@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8" />
+  <title>Карта вогню</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: monospace;
+      background: #f0f0f0;
+    }
+    .app {
+      max-width: 900px;
+      margin: 10px auto;
+      padding: 10px;
+      background: #ffffff;
+      border: 1px solid #cccccc;
+      border-radius: 6px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+    }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 10px;
+      align-items: center;
+    }
+    .toolbar select,
+    .toolbar button {
+      font-family: monospace;
+      font-size: 12px;
+      padding: 4px 8px;
+    }
+    .toolbar button.active {
+      background: #333;
+      color: #fff;
+    }
+    .canvas-container {
+      width: 100%;
+      height: 600px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    canvas {
+      background: #ffffff;
+      border: 1px solid #cccccc;
+      border-radius: 4px;
+      max-width: 100%;
+      max-height: 100%;
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  <div class="toolbar">
+    <label>Інструмент:
+      <select id="toolSelect"></select>
+    </label>
+    <button id="modeAdd" class="active">Режим: додати</button>
+    <button id="modeDelete">Режим: видалити</button>
+    <span id="scaleLabel"></span>
+    <button id="saveBtn">Зберегти PNG</button>
+    <span>Розміщено об’єктів: <span id="usedCount">0</span></span>
+  </div>
+  <div class="canvas-container" id="canvasContainer">
+    <canvas id="fireCanvas" width="600" height="600"></canvas>
+  </div>
+</div>
+
+<script>
+  // ── CONSTANTS ──────────────────────────────────────────────
+  const RINGS_M = [100, 200, 300, 400, 500, 1000, 1500, 2000];
+  const MAX_M = 2000;
+  const SECTOR_COLORS = ["#cc0000","#cc6600","#0055cc","#007700","#8800cc","#cc0077"];
+
+  const SYMBOLS = [
+    { id: "dacha",     label: "Дачі" },
+    { id: "village",   label: "Село" },
+    { id: "angar",     label: "Ангар" },
+    { id: "lep",       label: "Опора ЛЕП" },
+    { id: "tree",      label: "Окреме дерево" },
+    { id: "house",     label: "Будинок" },
+    { id: "kpp",       label: "КПП" },
+    { id: "obs_post",  label: "Спост. пост" },
+    { id: "dispatch",  label: "Диспетчерська" },
+    { id: "grove",     label: "Група дерев" },
+    { id: "duty",      label: "Місце чергування" },
+    { id: "pipe",      label: "Труба" },
+    { id: "vps",       label: "ВПС" },
+    { id: "barrack",   label: "Казарма" },
+    { id: "road",      label: "Траса" },
+    { id: "fence",     label: "Паркан" },
+    { id: "rls",       label: "РЛС" },
+  ];
+
+  // ── STATE ─────────────────────────────────────────────────
+  const canvas = document.getElementById("fireCanvas");
+  const ctx = canvas.getContext("2d");
+  const container = document.getElementById("canvasContainer");
+  const toolSelect = document.getElementById("toolSelect");
+  const modeAddBtn = document.getElementById("modeAdd");
+  const modeDeleteBtn = document.getElementById("modeDelete");
+  const saveBtn = document.getElementById("saveBtn");
+  const scaleLabel = document.getElementById("scaleLabel");
+  const usedCountEl = document.getElementById("usedCount");
+
+  let selectedTool = "dacha";
+  let mode = "add"; // add | delete
+  let items = [];   // {type, dx, dy}
+  let sectors = []; // {az1, az2, color}
+  let sectorStep = null; // {az1}
+  let cursorAz = null;
+  let scaleM = 2000;
+  let canvasSize = { w: 600, h: 600 };
+  let sectorColorIdx = 0;
+
+  function updateCanvasSize() {
+    const rect = container.getBoundingClientRect();
+    const sz = Math.min(rect.width, rect.height, 600);
+    canvasSize = { w: sz, h: sz };
+    canvas.width = sz;
+    canvas.height = sz;
+    drawAll();
+  }
+
+  window.addEventListener("resize", updateCanvasSize);
+  updateCanvasSize();
+
+  function pxPerM() {
+    return (Math.min(canvasSize.w, canvasSize.h) / 2 - 60) / scaleM;
+  }
+
+  function azFromPoint(x, y, CX, CY) {
+    const dx = x - CX, dy = y - CY;
+    let az = (Math.atan2(dx, -dy) * 180 / Math.PI + 360) % 360;
+    return Math.round(az);
+  }
+
+  // ── DRAW SYMBOL ───────────────────────────────────────────
+  function drawSymbol(ctx, id, x, y, s = 14) {
+    ctx.save();
+    ctx.lineWidth = 1.5;
+    switch (id) {
+      case "dacha":
+        ctx.fillStyle = "#eeeecc"; ctx.strokeStyle = "#666633";
+        ctx.fillRect(x - s, y, s * 2, s + 2);
+        ctx.strokeRect(x - s, y, s * 2, s + 2);
+        ctx.beginPath(); ctx.moveTo(x - s - 2, y); ctx.lineTo(x, y - s); ctx.lineTo(x + s + 2, y);
+        ctx.closePath(); ctx.fillStyle = "#ddccaa"; ctx.fill(); ctx.stroke();
+        break;
+      case "village":
+        for (let dx of [-12, 0, 12]) {
+          ctx.fillStyle = "#eeeecc"; ctx.strokeStyle = "#665533";
+          ctx.fillRect(x + dx - 5, y, 10, 9); ctx.strokeRect(x + dx - 5, y, 10, 9);
+          ctx.beginPath(); ctx.moveTo(x + dx - 7, y); ctx.lineTo(x + dx, y - 8); ctx.lineTo(x + dx + 7, y);
+          ctx.closePath(); ctx.fillStyle = "#ddccaa"; ctx.fill(); ctx.stroke();
+        }
+        break;
+      case "angar":
+        ctx.fillStyle = "#ddeeff"; ctx.strokeStyle = "#3366aa";
+        ctx.fillRect(x - s, y - 2, s * 2, s + 2); ctx.strokeRect(x - s, y - 2, s * 2, s + 2);
+        ctx.beginPath(); ctx.arc(x, y - 2, s, Math.PI, 0); ctx.lineWidth = 2; ctx.stroke();
+        break;
+      case "lep":
+        ctx.strokeStyle = "#333333";
+        ctx.beginPath(); ctx.moveTo(x, y - s); ctx.lineTo(x, y + s); ctx.lineWidth = 2; ctx.stroke();
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x - s, y - 4); ctx.lineTo(x + s, y - 4); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x - s + 3, y + 2); ctx.lineTo(x + s - 3, y + 2); ctx.stroke();
+        for (let px of [-s, s]) {
+          ctx.beginPath(); ctx.arc(x + px, y - 4, 2, 0, Math.PI * 2);
+          ctx.fillStyle = "#ffffff"; ctx.fill(); ctx.stroke();
+        }
+        break;
+      case "tree":
+        ctx.fillStyle = "#5aaa45"; ctx.strokeStyle = "#2a6a20";
+        ctx.beginPath(); ctx.ellipse(x, y - s / 2, s, s, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.strokeStyle = "#6a4020"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(x, y + s / 2); ctx.lineTo(x, y + s + 2); ctx.stroke();
+        break;
+      case "house":
+        ctx.fillStyle = "#f5f0e0"; ctx.strokeStyle = "#333333"; ctx.lineWidth = 2;
+        ctx.fillRect(x - s, y - 4, s * 2, s + 4); ctx.strokeRect(x - s, y - 4, s * 2, s + 4);
+        ctx.beginPath(); ctx.moveTo(x - s - 1, y - 4); ctx.lineTo(x, y - s - 2); ctx.lineTo(x + s + 1, y - 4);
+        ctx.closePath(); ctx.fillStyle = "#ccbbaa"; ctx.fill(); ctx.stroke();
+        ctx.fillStyle = "#aaddff"; ctx.lineWidth = 1;
+        ctx.fillRect(x - 4, y, 8, 8); ctx.strokeRect(x - 4, y, 8, 8);
+        break;
+      case "kpp":
+        ctx.fillStyle = "#ffffcc"; ctx.strokeStyle = "#333333"; ctx.lineWidth = 2;
+        ctx.fillRect(x - 6, y - s, 12, s * 2); ctx.strokeRect(x - 6, y - s, 12, s * 2);
+        ctx.strokeStyle = "#cc2200"; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(x + 6, y - 4); ctx.lineTo(x + s + 10, y - 4); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x - 6, y - 4); ctx.lineTo(x - s - 10, y - 4); ctx.stroke();
+        ctx.fillStyle = "#333"; ctx.font = "bold 8px monospace"; ctx.textAlign = "center";
+        ctx.fillText("КП", x, y - s + 9);
+        break;
+      case "obs_post":
+        ctx.fillStyle = "#eeeeff"; ctx.strokeStyle = "#334466"; ctx.lineWidth = 1.5;
+        ctx.fillRect(x - 6, y, 12, s); ctx.strokeRect(x - 6, y, 12, s);
+        ctx.beginPath(); ctx.moveTo(x - s, y); ctx.lineTo(x, y - s); ctx.lineTo(x + s, y);
+        ctx.closePath(); ctx.fillStyle = "#ccccee"; ctx.fill(); ctx.stroke();
+        ctx.fillStyle = "#aaddff";
+        ctx.beginPath(); ctx.ellipse(x, y - 4, 4, 4, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = "#334466";
+        ctx.beginPath(); ctx.ellipse(x, y - 5, 2, 2, 0, 0, Math.PI * 2); ctx.fill();
+        break;
+      case "dispatch":
+        ctx.fillStyle = "#e8f0ff"; ctx.strokeStyle = "#224488"; ctx.lineWidth = 2;
+        ctx.fillRect(x - s, y - 4, s * 2, s + 4); ctx.strokeRect(x - s, y - 4, s * 2, s + 4);
+        ctx.beginPath(); ctx.moveTo(x - s - 1, y - 4); ctx.lineTo(x, y - s - 2); ctx.lineTo(x + s + 1, y - 4);
+        ctx.closePath(); ctx.fillStyle = "#bbccee"; ctx.fill(); ctx.stroke();
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x, y - s - 2); ctx.lineTo(x, y - s - 10); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x - 5, y - s - 7); ctx.lineTo(x + 5, y - s - 7); ctx.stroke();
+        break;
+      case "grove":
+        ctx.fillStyle = "#7abb60"; ctx.strokeStyle = "#2a6a20";
+        for (let [dx, dy] of [[-9,-3],[0,-8],[9,-3],[-5,5],[5,5]]) {
+          ctx.beginPath(); ctx.ellipse(x + dx, y + dy, 7, 7, 0, 0, Math.PI * 2);
+          ctx.fill(); ctx.stroke();
+        }
+        break;
+      case "duty": {
+        const pts = [];
+        for (let i = 0; i < 10; i++) {
+          const a = (i * 36 - 90) * Math.PI / 180;
+          const r = i % 2 === 0 ? s : s * 0.45;
+          pts.push([x + r * Math.cos(a), y + r * Math.sin(a)]);
+        }
+        ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+        pts.forEach(p => ctx.lineTo(p[0], p[1]));
+        ctx.closePath();
+        ctx.fillStyle = "#ffcc44"; ctx.strokeStyle = "#cc8800"; ctx.fill(); ctx.stroke();
+        break;
+      }
+      case "pipe":
+        ctx.fillStyle = "#cccccc"; ctx.strokeStyle = "#444444"; ctx.lineWidth = 2;
+        ctx.fillRect(x - 5, y - s, 10, s * 2); ctx.strokeRect(x - 5, y - s, 10, s * 2);
+        ctx.beginPath(); ctx.ellipse(x, y - s, 5, 3, 0, 0, Math.PI * 2);
+        ctx.fillStyle = "#aaaaaa"; ctx.fill(); ctx.stroke();
+        ctx.strokeStyle = "#888888"; ctx.lineWidth = 1;
+        for (let i = 0; i < 3; i++) {
+          ctx.beginPath();
+          ctx.arc(x + (i - 1) * 4, y - s - 10 - i * 3, 4, Math.PI, 0);
+          ctx.stroke();
+        }
+        break;
+      case "vps":
+        ctx.fillStyle = "#cce0ff"; ctx.strokeStyle = "#0055cc"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.ellipse(x, y, s, s, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = "#0055cc"; ctx.font = "bold 13px monospace"; ctx.textAlign = "center";
+        ctx.fillText("H", x, y + 5);
+        break;
+      case "barrack":
+        ctx.fillStyle = "#f0ece0"; ctx.strokeStyle = "#333333"; ctx.lineWidth = 2;
+        ctx.fillRect(x - s, y - 2, s * 2, s); ctx.strokeRect(x - s, y - 2, s * 2, s);
+        ctx.beginPath(); ctx.moveTo(x - s - 1, y - 2); ctx.lineTo(x, y - s); ctx.lineTo(x + s + 1, y - 2);
+        ctx.closePath(); ctx.fillStyle = "#ddd5bb"; ctx.fill(); ctx.stroke();
+        ctx.fillStyle = "#aaddff"; ctx.lineWidth = 1;
+        for (let wx of [-7, 0, 7]) {
+          ctx.fillRect(x + wx - 3, y + 1, 6, 6); ctx.strokeRect(x + wx - 3, y + 1, 6, 6);
+        }
+        break;
+      case "road":
+        ctx.strokeStyle = "#555555"; ctx.lineWidth = 2;
+        ctx.strokeRect(x - s, y - 4, s * 2, 8);
+        break;
+      case "fence":
+        ctx.strokeStyle = "#555555"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(x - s, y); ctx.lineTo(x + s, y); ctx.stroke();
+        ctx.lineWidth = 1;
+        for (let fx = x - s; fx <= x + s; fx += 6) {
+          ctx.beginPath(); ctx.moveTo(fx, y); ctx.lineTo(fx, y - 7); ctx.stroke();
+        }
+        break;
+      case "rls":
+        ctx.strokeStyle = "#cc0000"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(x, y, s, (200 * Math.PI) / 180, (340 * Math.PI) / 180); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + s + 2); ctx.stroke();
+        ctx.lineWidth = 1;
+        for (let angle of [220, 270, 320]) {
+          const r = (angle * Math.PI) / 180;
+          ctx.beginPath(); ctx.moveTo(x, y);
+          ctx.lineTo(x + (s + 8) * Math.cos(r), y + (s + 8) * Math.sin(r)); ctx.stroke();
+        }
+        break;
+      default: break;
+    }
+    ctx.restore();
+  }
+
+  // ── DRAW SECTOR ───────────────────────────────────────────
+  function drawSector(ctx, cx, cy, r, az1, az2, color) {
+    const a1 = (az1 - 90) * Math.PI / 180;
+    const a2 = (az2 - 90) * Math.PI / 180;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r, a1, a2);
+    ctx.closePath();
+    ctx.fillStyle = color + "33";
+    ctx.fill();
+
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    for (let a of [a1, a2]) {
+      ctx.beginPath(); ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + r * Math.cos(a), cy + r * Math.sin(a)); ctx.stroke();
+    }
+
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.arc(cx, cy, r, a1, a2); ctx.stroke();
+
+    ctx.fillStyle = color;
+    ctx.font = "bold 11px monospace";
+    ctx.textAlign = "center";
+    const midA = (a1 + a2) / 2;
+    const lx = cx + (r + 18) * Math.cos(midA);
+    const ly = cy + (r + 18) * Math.sin(midA);
+    ctx.fillText(`${az1}°–${az2}°`, lx, ly);
+    ctx.restore();
+  }
+
+  // ── RENDER ALL ────────────────────────────────────────────
+  function drawAll() {
+    const W = canvasSize.w, H = canvasSize.h;
+    const ppm = pxPerM();
+    const R_MAX = scaleM * ppm;
+    const CX = W / 2, CY = H / 2;
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, W, H);
+
+    // radial spokes
+    ctx.strokeStyle = "#f0f0f0"; ctx.lineWidth = 1;
+    for (let az = 0; az < 360; az += 10) {
+      const r = (az - 90) * Math.PI / 180;
+      ctx.beginPath(); ctx.moveTo(CX, CY);
+      ctx.lineTo(CX + (R_MAX + 40) * Math.cos(r), CY + (R_MAX + 40) * Math.sin(r));
+      ctx.stroke();
+    }
+
+    // distance rings
+    for (let m of RINGS_M.filter(m => m <= scaleM)) {
+      const r = m * ppm;
+      const isMaj = m % 500 === 0;
+      ctx.strokeStyle = isMaj ? "#aaaaaa" : "#dddddd";
+      ctx.lineWidth = isMaj ? 1.5 : 1;
+      ctx.beginPath(); ctx.arc(CX, CY, r, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = isMaj ? "#888888" : "#bbbbbb";
+      ctx.font = `${isMaj ? "bold " : ""}10px monospace`;
+      ctx.textAlign = "center";
+      ctx.fillText(`${m}м`, CX, CY - r - 4);
+    }
+
+    // azimuth ring
+    const AZ_IN = R_MAX + 8, AZ_OUT = R_MAX + 22, AZ_LBL = R_MAX + 36;
+    ctx.strokeStyle = "#333333"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(CX, CY, AZ_OUT + 3, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(CX, CY, AZ_IN, 0, Math.PI * 2); ctx.stroke();
+
+    for (let az = 0; az < 360; az += 10) {
+      const rad = (az - 90) * Math.PI / 180;
+      const isCard = az % 90 === 0, isMaj = az % 30 === 0;
+      const rEnd = isMaj ? AZ_OUT : AZ_IN + 8;
+      ctx.strokeStyle = isCard ? "#000000" : isMaj ? "#333333" : "#888888";
+      ctx.lineWidth = isMaj ? 2 : 1;
+      ctx.beginPath();
+      ctx.moveTo(CX + AZ_IN * Math.cos(rad), CY + AZ_IN * Math.sin(rad));
+      ctx.lineTo(CX + rEnd * Math.cos(rad), CY + rEnd * Math.sin(rad));
+      ctx.stroke();
+
+      const lx = CX + AZ_LBL * Math.cos(rad), ly = CY + AZ_LBL * Math.sin(rad);
+      ctx.fillStyle = isCard ? "#000000" : "#444444";
+      ctx.font = isCard ? "bold 12px monospace" : "9px monospace";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(String(az), lx, ly);
+    }
+
+    // cardinal labels
+    for (let [az, lbl] of [[0,"Пн"],[90,"Сх"],[180,"Пд"],[270,"Зх"]]) {
+      const rad = (az - 90) * Math.PI / 180;
+      ctx.fillStyle = "#000000"; ctx.font = "bold 12px monospace";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(lbl, CX + (AZ_LBL + 16) * Math.cos(rad), CY + (AZ_LBL + 16) * Math.sin(rad));
+    }
+
+    // sectors
+    for (let s of sectors) drawSector(ctx, CX, CY, R_MAX, s.az1, s.az2, s.color);
+
+    // preview sector lines
+    if (sectorStep && cursorAz !== null) {
+      const a = (cursorAz - 90) * Math.PI / 180;
+      ctx.save(); ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = SECTOR_COLORS[sectorColorIdx % SECTOR_COLORS.length];
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(CX, CY);
+      ctx.lineTo(CX + R_MAX * Math.cos(a), CY + R_MAX * Math.sin(a)); ctx.stroke();
+      const a1 = (sectorStep.az1 - 90) * Math.PI / 180;
+      ctx.beginPath(); ctx.moveTo(CX, CY);
+      ctx.lineTo(CX + R_MAX * Math.cos(a1), CY + R_MAX * Math.sin(a1)); ctx.stroke();
+      ctx.restore();
+    }
+
+    // placed symbols
+    for (let item of items) {
+      const px = CX + item.dx * ppm, py = CY + item.dy * ppm;
+      drawSymbol(ctx, item.type, px, py, 13);
+    }
+
+    // center dot
+    ctx.fillStyle = "#000000";
+    ctx.beginPath(); ctx.arc(CX, CY, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath(); ctx.arc(CX, CY, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#333333"; ctx.font = "10px monospace"; ctx.textAlign = "left";
+    ctx.fillText("Ваша позиція", CX + 11, CY + 4);
+
+    scaleLabel.textContent = `Масштаб: ${scaleM} м`;
+    usedCountEl.textContent = items.length + sectors.length;
+  }
+
+  // ── EVENTS ────────────────────────────────────────────────
+  canvas.addEventListener("click", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (canvasSize.w / rect.width);
+    const y = (e.clientY - rect.top) * (canvasSize.h / rect.height);
+    const CX = canvasSize.w / 2, CY = canvasSize.h / 2;
+    const az = azFromPoint(x, y, CX, CY);
+    const ppm = pxPerM();
+    const dx = (x - CX) / ppm, dy = (y - CY) / ppm;
+
+    if (mode === "delete") {
+      // delete symbol
+      let minDist = 20, minIdx = -1;
+      items.forEach((item, i) => {
+        const px = CX + item.dx * ppm, py = CY + item.dy * ppm;
+        const d = Math.hypot(x - px, y - py);
+        if (d < minDist) { minDist = d; minIdx = i; }
+      });
+      if (minIdx >= 0) {
+        items = items.filter((_, i) => i !== minIdx);
+        drawAll();
+        return;
+      }
+      // delete sector by label
+      let minSec = -1;
+      const R_MAX = scaleM * ppm;
+      sectors.forEach((s, i) => {
+        const midA = ((s.az1 + s.az2) / 2 - 90) * Math.PI / 180;
+        const lx = CX + (R_MAX + 18) * Math.cos(midA), ly = CY + (R_MAX + 18) * Math.sin(midA);
+        if (Math.hypot(x - lx, y - ly) < 30) minSec = i;
+      });
+      if (minSec >= 0) {
+        sectors = sectors.filter((_, i) => i !== minSec);
+        drawAll();
+      }
+      return;
+    }
+
+    if (selectedTool === "sector") {
+      if (!sectorStep) {
+        sectorStep = { az1: az };
+      } else {
+        const color = SECTOR_COLORS[sectorColorIdx % SECTOR_COLORS.length];
+        sectorColorIdx++;
+        sectors.push({ az1: sectorStep.az1, az2: az, color });
+        sectorStep = null;
+      }
+    } else {
+      items.push({ type: selectedTool, dx, dy });
+    }
+    drawAll();
+  });
+
+  canvas.addEventListener("mousemove", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (canvasSize.w / rect.width);
+    const y = (e.clientY - rect.top) * (canvasSize.h / rect.height);
+    const CX = canvasSize.w / 2, CY = canvasSize.h / 2;
+    cursorAz = azFromPoint(x, y, CX, CY);
+    if (sectorStep) drawAll();
+  });
+
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const prev = scaleM;
+    const step = prev <= 500 ? 100 : 500;
+    const next = e.deltaY > 0 ? Math.min(prev + step, MAX_M) : Math.max(prev - step, 200);
+    scaleM = next;
+    drawAll();
+  }, { passive: false });
+
+  // ── SAVE PNG ──────────────────────────────────────────────
+  function savePNG() {
+    const LEGEND_H = 120;
+    const usedTypes = [...new Set(items.map(i => i.type))];
+    if (sectors.length > 0) usedTypes.unshift("sector");
+
+    const offscreen = document.createElement("canvas");
+    offscreen.width = canvasSize.w;
+    offscreen.height = canvasSize.h + LEGEND_H;
+    const ctx2 = offscreen.getContext("2d");
+    ctx2.drawImage(canvas, 0, 0);
+
+    ctx2.fillStyle = "#f9f9f9";
+    ctx2.fillRect(0, canvasSize.h, canvasSize.w, LEGEND_H);
+    ctx2.strokeStyle = "#cccccc"; ctx2.lineWidth = 1;
+    ctx2.beginPath(); ctx2.moveTo(0, canvasSize.h); ctx2.lineTo(canvasSize.w, canvasSize.h); ctx2.stroke();
+    ctx2.fillStyle = "#333333"; ctx2.font = "bold 11px monospace";
+    ctx2.textAlign = "left";
+    ctx2.fillText("УМОВНІ ПОЗНАЧЕННЯ:", 12, canvasSize.h + 18);
+
+    const cellW = canvasSize.w / Math.max(usedTypes.length, 1);
+    usedTypes.forEach((type, i) => {
+      const cx = 12 + i * cellW + cellW / 2;
+      const cy = canvasSize.h + 55;
+      if (type === "sector") {
+        ctx2.save();
+        ctx2.fillStyle = "#cc000033"; ctx2.strokeStyle = "#cc0000"; ctx2.lineWidth = 1.5;
+        ctx2.beginPath(); ctx2.moveTo(cx, cy);
+        ctx2.arc(cx, cy, 18, (-110)*Math.PI/180, (-50)*Math.PI/180); ctx2.closePath();
+        ctx2.fill(); ctx2.stroke(); ctx2.restore();
+        ctx2.fillStyle = "#333"; ctx2.font = "10px monospace"; ctx2.textAlign = "center";
+        ctx2.fillText("Сектор вогню", cx, cy + 28);
+      } else {
+        drawSymbol(ctx2, type, cx, cy, 13);
+        const sym = SYMBOLS.find(s => s.id === type);
+        ctx2.fillStyle = "#333"; ctx2.font = "10px monospace"; ctx2.textAlign = "center";
+        ctx2.fillText(sym ? sym.label : type, cx, cy + 28);
+      }
+    });
+
+    if (usedTypes.length === 0) {
+      ctx2.fillStyle = "#aaaaaa"; ctx2.font = "11px monospace"; ctx2.textAlign = "center";
+      ctx2.fillText("(знаки не розміщені)", canvasSize.w / 2, canvasSize.h + 55);
+    }
+
+    const link = document.createElement("a");
+    link.download = "карта_вогню.png";
+    link.href = offscreen.toDataURL("image/png");
+    link.click();
+  }
+
+  saveBtn.addEventListener("click", savePNG);
+
+  // ── TOOLBAR INIT ─────────────────────────────────────────
+  const allTools = [{ id: "sector", label: "Сектор вогню" }, ...SYMBOLS];
+  allTools.forEach(t => {
+    const opt = document.createElement("option");
+    opt.value = t.id;
+    opt.textContent = t.label;
+    toolSelect.appendChild(opt);
+  });
+  toolSelect.value = "dacha";
+  toolSelect.addEventListener("change", () => {
+    selectedTool = toolSelect.value;
+  });
+
+  modeAddBtn.addEventListener("click", () => {
+    mode = "add";
+    modeAddBtn.classList.add("active");
+    modeDeleteBtn.classList.remove("active");
+  });
+  modeDeleteBtn.addEventListener("click", () => {
+    mode = "delete";
+    modeDeleteBtn.classList.add("active");
+    modeAddBtn.classList.remove("active");
+  });
+
+  // перший рендер
+  drawAll();
+</script>
+</body>
+</html>
