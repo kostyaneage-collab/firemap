@@ -1,0 +1,12 @@
+{
+  "name": "firemap",
+  "version": "1.0.0",
+  "scripts": {},
+  "dependencies": {
+    "@capacitor/android": "latest",
+    "@capacitor/core": "latest"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "latest"
+  }
+}
